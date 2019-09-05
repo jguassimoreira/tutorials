@@ -1,0 +1,439 @@
+---
+title: "Gardner Encoding Tutorial"
+output: html_notebook
+---
+
+First let's simulate some data. Later you will see this done on real data, but it's *always* a good idea to run your analyses on simulations where you know the ground truth to test how your model behaves. So, let's start with some basic assumptions about how the model works. The model assumes that each voxel (or EEG electrode or whatever measurement you are making) is a linear sum of individual channels that are tuned for some stimulus feature. We will do this here with orientation as the feature, but this can and has been done with other features (direction of motion, space or really anything in which you can define a tuning function that is reasonable given what you know about the neural representation).
+
+Start, by making a matrix called neuralResponse in which you have 90 neurons (one per row of the matrix) and in each column it's ideal response to one of 180 orientations. Let's assume that the neurons are tuned according to a Von Mises function which is often used as a circular equivalent to a Gaussian. Each neuron will be tuned to a different orientation. Why 90 neurons? Just so that we can keep the matrix dimensions clear. Half the battle with linear algebra is getting your matrix dimensions right after all.
+
+
+```{r}
+#Load in some libraries we'll need throughout the tutorial
+library(pracma)
+library(emdbook)
+library(NPflow)
+
+iNeuron = 1
+orientations = c(0:179)
+k = 10
+neuralResponse = matrix(NA, 90, 180)
+
+#Loop over each neuron's tuning function  
+for (orientPreference in seq(0,179,2)) {
+    #Compute the neural response as a Von Mises func
+    #Note the 2 here which makes it so that our 0-180
+    #orientation space gets mapped to all 360 degrees
+    neuralResponse[iNeuron,] = exp(k*cos(2*pi*(orientations-orientPreference)/180))
+    #Normalize to a height of 1
+    neuralResponse[iNeuron,] = neuralResponse[iNeuron,] / max(neuralResponse[iNeuron,])
+    #update the counter
+    iNeuron = iNeuron+1
+  }
+```
+
+If you got that working then, you should be able to plot a single neuron response function, let's try the 45th neuron - which should be tuned to 90 degees.
+
+```{r}
+#plot neuron 45's response (should be highest for 90 deg)
+plot(orientations, neuralResponse[45,], type="l", xlab = "Orientation", ylab = "Channel response (normalized units to 1")
+
+#You can uncomment the code below if you want to check and make sure thatit is indeed the case that neuron 45's response is the highest for 90 deg.
+#max(neuralResponse[45,])
+#which(neuralResponse[45,] == max(neuralResponse[45,]))
+```
+
+
+Ok. Now we want to simulate v voxels (say 250) response as random combinations of the neural tuning functions. The basic idea is that each voxel contains some random sub-populations of neurons tuned for different orientations and the total response is just a linear combination of these. So, let's make a random matrix that are the weights of each of these neurons onto each voxel. This should be a matrix called neuronToVoxelWeights that is nNeurons x nVoxels in size where each column contains ranodom weights for each voxel.
+
+```{r}
+#Make a random weighting of neurons on to each voxel
+nNeurons = size(neuralResponse)[1]
+nVoxels = 50
+set.seed(123)
+neuronToVoxelWeights = matrix(runif(nNeurons*nVoxels), nNeurons, nVoxels)
+```
+
+Now, let's simulate an experiment in which we have nStimuli of different orientations. To keep things simple, we will have nStimuli=8 stimuli that are evenly spaced across orientations starting at 0. And we will have nRepeats (say 20) of each stimuli. In a real experiment, we would randomize the order of the stimuli so as to avoid adaptation and other non-stationary effects, but here we can just have them in a sequential order. We can start by making an array stimuli of length nStimuli x nRepeats with the stimulus values.
+
+```{r}
+#Make stimulus array
+nStimuli = 8
+#Evenly spaced stimuli
+stimuli = seq(0, 179, 180/nStimuli)
+#Number of repeats
+nRepeats = 20
+stimuli = c(rep(stimuli, nRepeats))
+```
+
+A few simple things here - let's round all the stimulus values to the nearest integer degree (just for ease of calculation) and add one (because Matlab indexes starting with one and not zero) and make this into a column array
+
+```{r}
+#round and make it a column array
+stimuli = t(t(round(stimuli)+1))
+#size(stimuli) uncomment to check dimensions
+```
+
+ok, now we can compute the response to each stimulus. So we should make a voxelResponse matrix (dimensions nTrials = nStimuli x nRepeats by nVoxels).
+
+```{r}
+#Compute the voxelResponse
+nTrials = nStimuli * nRepeats;
+voxelResponse = matrix(NaN, nTrials, nVoxels)
+for (iTrial in 1:nTrials) {
+  #Get the neural response to this stimulus, by indexing the correct column of the neuralResponse matrix
+  thisNeuralResponse = neuralResponse[,stimuli[iTrial]]
+  #Multiply this by the neuronToVoxelWeights to get the voxel response on this trial. Note that you need to get the matrix dimensions right, so the transpose is needed on thisNeuralResponse
+  voxelResponse[iTrial,] = t(as.matrix(thisNeuralResponse)) %*% neuronToVoxelWeights
+}
+```
+
+Great. let's see what we got. Plot the response to, say, trial 7
+
+```{r}
+plot(voxelResponse[7,], type="l", xlab = "Voxel (number)", ylab = "Voxel response (fake measurement units)", col = "blue")
+```
+
+Now, plot another trial that is in response to the same stimulus. See any problem?
+
+```{r}
+plot(voxelResponse[7,], type="l", xlab = "Voxel (number)", ylab = "Voxel response (fake measurement units)", col = "blue")
+lines(voxelResponse[7+nStimuli,], type="l", col = "red")
+```
+
+They're identical so far since we don't have noise. Not very realistic, right? 
+Ok. Let's fix that by adding random gaussian noise to the voxelResponses (BTW - this is a a very simple noise model called IID - independent, identically distributed gaussian noise - in reality, noise is going to have some complex characteristics, for example, there might be more correlation between neighboring voxels than voxels spatially distant - or more correlation between voxels that receive similarly tuning - but for this purpose, let's go with this simple nosie model). Just to keep the scale understandable, let's normalize the voxel responses to have a mean of 1 and then add gaussian noise with a fixed noiseStandardDeviation of, say, 0.05.
+
+```{r}
+#Add nosie to the voxel responses
+noiseStandardDeviation = .05;
+#Normalize the response
+voxelResponse = voxelResponse / mean(voxelResponse)
+#Add Gaussian noise
+voxelResponse = voxelResponse + noiseStandardDeviation*rnorm(size(voxelResponse)[1]*size(voxelResponse)[2])
+
+```
+
+Always check your work - now two responses should not be identical, but correlated. And not correlated with responses to very different orientations.
+
+```{r}
+#Check the voxelResponses
+par(mfrow=c(2,2))
+stim1 = 7; stim2 = 3
+plot(voxelResponse[stim1,], type = 'l', col = "blue")
+par(new=TRUE)
+plot(voxelResponse[stim1+nStimuli,], type = 'l', col="red", xlab = "Voxel (number)", ylab = "Voxel response (fake measurement units")
+plot(voxelResponse[stim1,], voxelResponse[stim1+nStimuli,], xlab = "Response to 1st presentation", ylab = "Response to 2nd presentation")
+plot(voxelResponse[stim1,], voxelResponse[stim2,], xlab = sprintf("Response to stimulus: %s", stimuli[stim1]), ylab = sprintf("Response to stimulus: %s", stimuli[stim2]))
+
+```
+
+Okey, dokey. We now have a simulated voxelResponse that we can test our model with. Remember, that everything that we did in the simulation is an assumption: Von Mises tuned neurons, random linear weighting, IID noise and SNR (signal-to-noise ratio as in the magnitude of the orientation tuned response compared to the noise). Each of these may or may not be valid for real data and should ideally be tested (or at least thought about deeply!). The beauty of a simulation is that we can change these assumptions and see how they affect the analysis - something that is really, really important to do as you learn about new analysis techniques. If the assumptions are incorrect, the analysis can fall apart in ways that are often unexpected and you may infer incorrect conclusions, so play around with these simulations first to understand what is going on!
+
+**Encoding Model**  
+Ok, let's build the encoding model. In this case we are going to assume that there are nChannels = 8, that are tuned as exponentiated and rectified sinusoids to different orientations. Note that this is different from the assumptions above of Von Mises tuned neurons. Will get back to that later! Let's build a matrix called channelBasis which is 180 x nChannels that contains the ideal channel responses (also called channel basis functions) to each of 180 orientations. We will use gaussian functions raised to the exponent 7.
+
+```{r}
+#Make channel basis functions
+nChannels = 8
+exponent = 7
+prefOrientation = seq(0, 179, 180/nChannels) 
+#Loop over each channel
+channelBasis = matrix(NaN, length(orientations), nChannels)
+for (iChannel in 1:nChannels) {
+  #get sinusoid. Note the 2 here which makes it so that our 0-180 orientation
+  #gets mapped to all 360 degrees
+  thisChannelBasis = cos(2*pi*(orientations-prefOrientation[iChannel])/180)
+  #rectify
+  thisChannelBasis[thisChannelBasis<0] = 0
+  #Raise to exponent
+  thisChannelBasis = thisChannelBasis^exponent
+  #Keep in matrix
+  channelBasis[,iChannel] = thisChannelBasis
+}
+```
+
+Ok. If that worked, then we should have 8 channels that are tuned for different orientations. Let's plot it to make sure!
+
+Should look something like the following.
+
+```{r}
+plot(orientations, channelBasis[,1], type="l", col = "blue", xlab = "Preferred 
+     orientation (deg)", ylab = "Ideal channel response (normalized to 1)")
+lines(orientations, channelBasis[,2], type="l", col = "green")
+lines(orientations, channelBasis[,3], type="l", col = "red")
+lines(orientations, channelBasis[,4], type="l", col = "turquoise")
+lines(orientations, channelBasis[,5], type="l", col = "purple")
+lines(orientations, channelBasis[,6], type="l", col = "yellow")
+lines(orientations, channelBasis[,7], type="l", col = "black")
+lines(orientations, channelBasis[,8], type="l", col = "orange")
+
+```
+
+Great. Now, let's compute responses of these idealized channel basis functions to each one of th nTrials in the array stimuli. We will compute a nTrial x nChannel matrix called channelResponse.
+
+```{r}
+#Compute the channelResponse for each trial
+channelResponse = matrix(NaN, nTrials, nChannels)
+for (iTrial in 1:nTrials) {
+  channelResponse[iTrial,] = channelBasis[stimuli[iTrial],]
+}
+```
+
+Easy, right? Now let's fit this model to the simulated data. Remember that the model that we have is: channelResponses (nTrials x nChannels) x estimatedWeights (nChannels x nVoxels) = voxelResponses (nTrials x nVoxels) You can solve this by doing your favorite least-squares estimation procedure (or if you want to be fancy, you could do some robust regression technique). We'll just do the basic here.
+
+```{r}
+#Compute estimated weights
+estimatedWeights = pinv(channelResponse) %*% voxelResponse
+```
+
+**Model Fit**  
+Whenever you fit a model, it's always important to compute a measure of model fit - how well does the model actually fit the data. r2, amount of variance accounted for, is a good measure for this sort of data. So, compute that by seeing what the model predicts for the data (that's easy, that's just channelResponse x estimatedWeights and remove that from the data. Then compute 1 minus the residual variance / variance.
+
+```{r}
+modelPrediction = channelResponse %*% estimatedWeights
+residualResponse = voxelResponse-modelPrediction
+r2 = 1-var(as.vector(residualResponse))/var(as.vector(voxelResponse))
+r2
+```
+
+You should get a pretty good r2 value (like over 80-90% of variance accounted for). That would be terrific for real data - great working with a simulation, right?
+
+**Inverted encoding model**  
+Ok. Now, let's invert the model to see what it predicts for channel responses. But, first we gotta talk about cross-validation. Always, always cross-validate. There, we are done talking about it. Here, let's do a simple version where we split the data into two (split-half cross-validation). Make two matrices from your voxelData where trainVoxelResponse is the first half trials and testVoxelResponse is the second half. Then compute estimatedWeights on the trainVoxelResponse.
+
+```{r}
+#Split half into train and test
+firstHalf = c(1:round(nTrials/2))
+secondHalf = c((round(nTrials/2)+1):nTrials)
+trainVoxelResponse = voxelResponse[firstHalf,]
+testVoxelResponse = voxelResponse[secondHalf,]
+#Compute weights on train data
+estimatedWeights = pinv(channelResponse[firstHalf,])%*%trainVoxelResponse
+```
+
+Now on the second half of the data, compute the estimatedChannelResponse (references above equations for channelResponses and use least-squares estimation)
+
+```{r}
+#Compute channel response from testVoxelResponse
+estimatedChannelResponse = testVoxelResponse %*% pinv(estimatedWeights)
+```
+
+OK. Let's see what we've got. Plot the mean estimatedChannelResponse for each stimulus type. 
+
+```{r}
+plot(prefOrientation, apply(estimatedChannelResponse[seq(1, 80, nStimuli), ], 2, mean), type="l", col="red", xlab = "Channel orientation preference (deg)",
+     ylab = "Estimated channel response (percentile of max)", main = sprintf("r2 = %.3f", r2))
+lines(prefOrientation, apply(estimatedChannelResponse[seq(2, 80, nStimuli), ], 2, mean), type="l", col="green")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(3, 80, nStimuli), ], 2, mean), type="l", col="blue")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(4, 80, nStimuli), ], 2, mean), type="l", col="yellow")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(5, 80, nStimuli), ], 2, mean), type="l", col="orange")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(6, 80, nStimuli), ], 2, mean), type="l", col="purple")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(7, 80, nStimuli), ], 2, mean), type="l", col="turquoise")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(8, 80, nStimuli), ], 2, mean), type="l", col="black")
+
+```
+
+Maybe, a little too pretty. Try the whole simulation again, but this time add more noise (try, say an order of magnitude larger noise standard deviation - 0.5) and see what happens to the estimated channel response profiles. Make sure to keep the original low noise voxelResponses by naming the new voxelResponses something different like voxelResponseNoisy
+
+```{r}
+#Compute voxel response without noise
+voxelResponseNoisy = matrix(NaN, nTrials, nVoxels)
+for (iTrial in 1:nTrials) {
+  #get the neural response to this stimulus by indexing the appropriate column of neuralResponse matrix
+  thisNeuralResponse = neuralResponse[,stimuli[iTrial]]
+  #Multiply this by the neuronToVoxelWeights to get the voxel response on this trial. 
+  #Note that you need to get the matrix dimensions right, so transpose is needed on thisNeuralResponse
+  voxelResponseNoisy[iTrial,] = t(as.matrix(thisNeuralResponse)) %*% neuronToVoxelWeights
+}
+
+#Add noise
+noiseStandardDeviation = .5;
+#Normalize response
+voxelResponseNoisy = voxelResponseNoisy / mean(voxelResponseNoisy)
+#Add gaussian noise
+voxelResponseNoisy = voxelResponseNoisy + noiseStandardDeviation*rnorm(size(voxelResponseNoisy)[1]*size(voxelResponseNoisy)[2])
+
+#Split into train and test
+trainVoxelResponseNoisy = voxelResponseNoisy[firstHalf,]
+testVoxelResponseNoisy = voxelResponseNoisy[secondHalf,]
+
+#Compute weights on train data
+estimatedWeights = pinv(channelResponse[firstHalf,]) %*% trainVoxelResponseNoisy
+
+#Compute model prediction on test data
+modelPrediction = channelResponse[secondHalf,] %*% estimatedWeights
+#Compute residual
+residualResponse = testVoxelResponseNoisy-modelPrediction
+#Compute r2
+r2 = 1-var(as.vector(residualResponse))/var(as.vector(testVoxelResponseNoisy))
+
+#Inverted model and compute channel response
+estimatedChannelResponse = testVoxelResponseNoisy %*% pinv(estimatedWeights)
+
+#plot estimated channel profiles
+plot(prefOrientation, apply(estimatedChannelResponse[seq(1, 80, nStimuli), ], 2, mean), type="l", col="red", xlab = "Channel orientation preference (deg)", ylab = "Estimated channel response (percential of max)", main = sprintf("r2 = %.3f", r2))
+lines(prefOrientation, apply(estimatedChannelResponse[seq(2, 80, nStimuli), ], 2, mean), type="l", col="orange")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(3, 80, nStimuli), ], 2, mean), type="l", col="green")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(4, 80, nStimuli), ], 2, mean), type="l", col="yellow")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(5, 80, nStimuli), ], 2, mean), type="l", col="turquoise")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(6, 80, nStimuli), ], 2, mean), type="l", col="blue")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(7, 80, nStimuli), ], 2, mean), type="l", col="purple")
+lines(prefOrientation, apply(estimatedChannelResponse[seq(8, 80, nStimuli), ], 2, mean), type="l", col="pink")
+
+```
+
+There, that made the estimated channel response profiles more realistic
+
+**Stimulus Likelihood**  
+In the above, an important distinction is that we are inverting to estimate the model responses and not the stimulus itself. There are some cases where this may be exactly what we want, for example, when we model responses as linear combinations of target and mask or when we want to know about off-target gain. But, often what we really want to know is what the population (given our model) tells us about the stimulus. To be clear, there is distinction between reconstructing the model and reconstructing the stimulus.
+
+We can do this using a Bayesian analysis that creates a stimulus likelihood function - that is a function that tells you the probability of any stimulus given a particular response . For this, we need to model not just the mean response which the encoding model above does, but also the variance around that mean response.
+
+The basic idea is to look at the residuals after you have fit the encoding model. That is, one removes the prediction of the channel encoding model by subtraction and looks at the residuals.
+
+In particular, one wants to fit a multi-variate gaussian noise model to these residuals. In Van Bergen & Jehee, 2015 they use a noise model which has individual variances on each voxel, covariance across voxels and variance on each one of the channels.
+
+Once you know this you can figure out the probability of any stimulus given the measured response, by seeing where that response lives in the multivariate gaussian who's mean is the channel encoding model prediction for that orientation and whose covariance is modeled with equations from the main page of this tutorial.
+
+For the purpose of this tutorial, we will just model the noise as independent, identically distributed gaussian noise on each voxel. Of course, this is probably wrong, as voxels may have different amount of variation and will have covariation with each other - both due to spatially local effects and to common sources of signal. All of this has been modeled elegantly and validated in Van Bergen & Jehee, 2017.
+
+To compute our simple noise model, we just get the residual variance on each voxel after fitting the encoding model. So, look at the residual, voxel-by-voxel and compute the variance.
+
+```{r}
+#split half into train and test
+firstHalf = c(1:round(nTrials/2))
+secondHalf = c((round(nTrials/2)+1):nTrials)
+trainVoxelResponse = voxelResponse[firstHalf,]
+testVoxelResponse = voxelResponse[secondHalf,]
+#Compute weights on train data
+estimatedWeights = pinv(channelResponse[firstHalf,]) %*% trainVoxelResponse
+#Compute model prediction on test data
+modelPrediction = channelResponse[secondHalf,] %*% estimatedWeights
+#compute residual
+residualResponse = testVoxelResponseNoisy-modelPrediction
+#Compute residual variance (not this is scalar)
+residualVariance = var(as.vector(residualResponse))
+#make this into a covar matrix in which the diagona contains the 
+#variance for each voxel and off diagonals (in this case all 0) 
+#contain covariances between voxels
+modelCovar = eye(nVoxels)*residualVariance
+```
+
+Ok, now we have our full model. The weights give you the mean response expected for any orientation stimulus and the covariance matrix tells us the variation around that mean. So, now if we want to figure out the probability of seeing any test response given any orientation, we simply compute the probability as a multivariate gaussian probability distribution.
+
+```{r}
+#cycle over each trial
+nTestTrials = size(testVoxelResponse,1)
+likelihood = matrix(NaN, nTestTrials, 179)
+for (iTrial in 1:nTestTrials) {
+  #cycle over all possible orientations
+  for (iOrientation in 1:179) {
+    #Compute the mean voxel response predcited by the channel encoding model
+    predictedResponse = channelBasis[iOrientation, ] %*% estimatedWeights
+    #Now use that mean response and the model covar to estimate
+    #the probability of seeing this orientation given the response on
+    #this trial
+    likelihood[iTrial,iOrientation] = dmvnorm(testVoxelResponse[iTrial,], predictedResponse, modelCovar)
+  }
+}
+
+plot(c(1:179), apply(likelihood[seq(1, 80, nStimuli), ], 2, mean), type="l", col="red", xlab = "stimulus orientation (deg)", ylab = "Probability given trial response")
+lines(c(1:179), apply(likelihood[seq(2, 80, nStimuli), ], 2, mean), type="l", col="orange")
+lines(c(1:179), apply(likelihood[seq(3, 80, nStimuli), ], 2, mean), type="l", col="green")
+lines(c(1:179), apply(likelihood[seq(4, 80, nStimuli), ], 2, mean), type="l", col="yellow")
+lines(c(1:179), apply(likelihood[seq(5, 80, nStimuli), ], 2, mean), type="l", col="blue")
+lines(c(1:179), apply(likelihood[seq(6, 80, nStimuli), ], 2, mean), type="l", col="turquoise")
+lines(c(1:179), apply(likelihood[seq(7, 80, nStimuli), ], 2, mean), type="l", col="purple")
+lines(c(1:179), apply(likelihood[seq(8, 80, nStimuli), ], 2, mean), type="l", col="pink")
+
+```
+
+**Inverted Encoding model with different channel basis functions**  
+Now, let's do a little trick. We're going to show that the channel basis functions in the simple inverted encoding model above are only constrained up to a linear transform, which means that you can recreate channel response profiles of arbitrary shapes (as long as they are linearly transformable from the original unimodal exponentiated half-sinusoids we used).
+
+First, we will design a transformation matrix that will convert are original channel basis functions into bimodal ones. Can you figure out an 8×8 transform that will do that?
+
+```{r}
+#Reweight the channels
+channelReweighting = matrix(c(0, 0.8, 0.4, 0, 0, 0, 0.4, 0.8), 8, 1)
+#make into a full matrix xform to transform the original channels
+xform = matrix(NaN, nChannels, nChannels)
+for (iChannel in 1:nChannels) {
+  xform[iChannel,] = circshift(channelReweighting, c(iChannel-1,0))
+}
+bimodalChannelBasis = channelBasis %*% xform
+```
+
+Now, take a look at those channels
+
+```{r}
+#Let's take a peek at channel 5
+plot(orientations, bimodalChannelBasis[,5], xlab = "orientation (deg)", ylab = "Channel response (normalized to 1)", type = "l")
+```
+
+```{r}
+#Compute the channelResponse for each trial
+for (iTrial in 1:nTrials) {
+  channelResponse[iTrial,] = bimodalChannelBasis[stimuli[iTrial],]
+}
+
+#compute estimated weights
+estimatedWeights = pinv(channelResponse) %*% voxelResponse
+
+#Compute model prediction
+modelPrediction = channelResponse %*% estimatedWeights
+#Compute residual
+residualResponse = voxelResponse-modelPrediction
+#compute r2
+r2 = 1 - var(as.vector(residualResponse))/var(as.vector(voxelResponse))
+
+estimatedChannelResponse = testVoxelResponse %*% pinv(estimatedWeights)
+
+plot(prefOrientation, apply(estimatedChannelResponse[seq(5, 80, nStimuli), ], 2, mean), xlab="Channel preferred orientation (deg)", ylab = "Estimated channel response (percentile of full)", main = sprintf("r2 = %.3f", r2), type = 'l')
+```
+
+Remember, there was nothing in our simulated data that was bimodal. The bimodal channel response functions that we get out are simply because we modeled the responses in this way. You get out what you put in. And in this case, since the channel basis functions are linearly related to the original ones we used, they account for exactly the same amount of variance - since they span the same subspace.
+
+Ok. So, we need to be careful about what to interpret when we invert to get the model back. That is, when we do that, we get back the model that we put in. If we use the Bayesian model from above, we can avoid the ambiguity with the channel basis functions. Compute the Bayesian model with this bimodal basis set and you will see that you get back a unimodal likelihood function.
+
+To compute our simple noise model, we just get the residual variance on each voxel after fitting the encoding model. So:
+
+```{r}
+#compute weights on train data
+estimatedWeights = pinv(channelResponse[firstHalf,]) %*% trainVoxelResponse
+
+#compute model prediction on test data
+modelPrediction = channelResponse[secondHalf,] %*% estimatedWeights
+#compute residual
+residualResponse = testVoxelResponseNoisy-modelPrediction
+#compute residual variance, note this is a scalar
+residualVariance = var(as.vector(residualResponse))
+
+#Make this into a covariance matrix in which diagonal contains var for
+#each voxel and off diags (in this case all 0) contain cov btwn voxels
+modelCovar = eye(nVoxels)*residualVariance
+
+#loop over each trial
+nTestTrials = size(testVoxelResponse)[1]
+#loop over all possible orientations
+for (iTrial in 1:nTestTrials) {
+  for (iOrientation in 1:179){
+    #compute the mean voxel response predictd by channel encoding model
+    predictedResponse = bimodalChannelBasis[iOrientation,]%*%estimatedWeights
+    #Now use mean response and model covariance to estimate the 
+    #the probability of seeing this orientation given resp this trial
+    likelihood[iTrial,iOrientation] = dmvnorm(testVoxelResponse[iTrial,], predictedResponse, modelCovar)
+  }
+}
+
+#Now plot the likelihood function averaged over repeats
+plot(c(1:179), apply(likelihood[seq(1, 80, nStimuli), ], 2, mean), type="l", col="red", xlab = "stimulus orientation (deg)", ylab = "Probability given trial response")
+lines(c(1:179), apply(likelihood[seq(2, 80, nStimuli), ], 2, mean), type="l", col="orange")
+lines(c(1:179), apply(likelihood[seq(3, 80, nStimuli), ], 2, mean), type="l", col="green")
+lines(c(1:179), apply(likelihood[seq(4, 80, nStimuli), ], 2, mean), type="l", col="yellow")
+lines(c(1:179), apply(likelihood[seq(5, 80, nStimuli), ], 2, mean), type="l", col="blue")
+lines(c(1:179), apply(likelihood[seq(6, 80, nStimuli), ], 2, mean), type="l", col="turquoise")
+lines(c(1:179), apply(likelihood[seq(7, 80, nStimuli), ], 2, mean), type="l", col="purple")
+lines(c(1:179), apply(likelihood[seq(8, 80, nStimuli), ], 2, mean), type="l", col="pink")
+```
