@@ -63,6 +63,7 @@ sum((fitted(mod1) - y)^2)/100
 #MSE stays the same. Model's predictive ability is equivalent across the two 
 #datasets. But using R-square would make you believe model had poor predictive
 #power in the second sample
+#JFGM Note: I wonder if you could use MAE instead of MSE. 
 
 #4. R-squared cannot be compared between a model with untransformed Y and one 
 #with a transformed Y. or between diff transformations of Y. R-squared can
